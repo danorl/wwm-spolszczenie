@@ -1,5 +1,5 @@
 {
-  "version": "2.4-2026-11-19-r2",
+  "version": "2.4-2026-11-19-r2.1",
   "files": {
     "translate_words_map_en": {
       "sha256": "ea833f9abc9314d4bafb3f7ea99464584d59c428398218259df1815d8ca86ca1",
@@ -15,7 +15,7 @@
     },
     "translate_words_map_en_diff": {
       "sha256": "548c9c60805346091152725e32af5d888345877103fec3cde083c50398c1afc0",
-      "original": "d39d74f85c7e6f1616890d36e37c8d52aad7c9578f4b73331edafd7cd96a75c0"
+      "original": "b25ce2a3e256368bc88119a21e3a251199b00e5152dbbf7b14312099e1fa6d45"
     }
   }
 }
