@@ -1,8 +1,8 @@
 {
-  "version": "2.4-2026-11-19-r2.1",
+  "version": "2.4-2026-11-19-r3",
   "files": {
     "translate_words_map_en": {
-      "sha256": "ea833f9abc9314d4bafb3f7ea99464584d59c428398218259df1815d8ca86ca1",
+      "sha256": "656bc68c2235c72a04c79baae4d8d450589ded6ea7a315f2cb2660cfe0af9bd3",
       "original": "9a2bb446dc2dcc1e2bb4b1bb3207e2990ef7533341a9035ef376c545c3bbdbef",
       "parts": [
         "translate_words_map_en.001",
@@ -14,7 +14,7 @@
       "original": "de48303cca4d06aace5f3cff086903b68636657517cbe663e5e6ae95575c4b49"
     },
     "translate_words_map_en_diff": {
-      "sha256": "548c9c60805346091152725e32af5d888345877103fec3cde083c50398c1afc0",
+      "sha256": "7c42d37f7213d9c5acaba1a6b124315c04c9c22516f76fb27be99b8060ed53d7",
       "original": "b25ce2a3e256368bc88119a21e3a251199b00e5152dbbf7b14312099e1fa6d45"
     }
   }
