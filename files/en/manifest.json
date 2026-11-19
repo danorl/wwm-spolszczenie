@@ -1,0 +1,21 @@
+{
+  "version": "2.4-2026-11-19-r2",
+  "files": {
+    "translate_words_map_en": {
+      "sha256": "ea833f9abc9314d4bafb3f7ea99464584d59c428398218259df1815d8ca86ca1",
+      "original": "9a2bb446dc2dcc1e2bb4b1bb3207e2990ef7533341a9035ef376c545c3bbdbef",
+      "parts": [
+        "translate_words_map_en.001",
+        "translate_words_map_en.002"
+      ]
+    },
+    "translate_words_map_en__small": {
+      "sha256": "e06500a7231ff66be17a568e717d4c236ea894ebcefc46f3c4f3919d9c81111b",
+      "original": "de48303cca4d06aace5f3cff086903b68636657517cbe663e5e6ae95575c4b49"
+    },
+    "translate_words_map_en_diff": {
+      "sha256": "548c9c60805346091152725e32af5d888345877103fec3cde083c50398c1afc0",
+      "original": "d39d74f85c7e6f1616890d36e37c8d52aad7c9578f4b73331edafd7cd96a75c0"
+    }
+  }
+}

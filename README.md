@@ -1,46 +1,21 @@
-\# 🇵🇱 Where Winds Meet - Instalator Spolszczenia v1.0
+# Where Winds Meet — instalator spolszczenia WWMPL
 
+Paczka **2.4-2026-11-19-r2** zastępuje angielskie teksty gry polskim tłumaczeniem. Instalator obsługuje Steam oraz Epic / Launcher.
 
+1. Pobierz i uruchom [Instalator-WWMPL.exe](https://raw.githubusercontent.com/danorl/wwm-spolszczenie/main/Instalator/Instalator-WWMPL.exe).
+2. Wybierz platformę i wskaż główny folder gry, jeśli instalator go nie wykrył.
+3. Zamknij grę i kliknij **ZAINSTALUJ / AKTUALIZUJ**.
+4. Kliknij **URUCHOM GRĘ (PL)**. Zostaw instalator otwarty do potwierdzenia podmiany. W ustawieniach gry wybierz **English**.
 
-Profesjonalny, automatyczny instalator polskiego tłumaczenia do gry \*\*Where Winds Meet\*\*. Stworzony, aby ułatwić proces instalacji i aktualizacji plików językowych.
+**PRZYWRÓĆ ORYGINALNE TŁUMACZENIE** korzysta z kopii zapisanych w folderze `Spolszczenie_Data/WWMPL` wewnątrz katalogu gry. Przy niezgodnej wersji plików użyj funkcji weryfikacji plików gry w Steam lub w launcherze.
 
+## Uruchomienie ze źródeł
 
+Na Windows z Pythonem 3.11 lub nowszym:
 
-\## ✨ Funkcje instalatora
+```powershell
+python -m pip install requests customtkinter
+python Instalator/installer.py
+```
 
-\* \*\*Automatyczne wykrywanie ścieżki Steam\*\*: Program sam odnajduje folder z grą.
-
-\* \*\*System aktualizacji\*\*: Sprawdza wersję plików na serwerze i informuje o nowościach.
-
-\* \*\*Bezpieczeństwo\*\*: Możliwość błyskawicznego przywrócenia oryginalnych plików gry.
-
-\* \*\*Wsparcie techniczne\*\*: Bezpośredni link do poradnika Steam oraz wsparcia twórcy.
-
-
-
-\## ⚠️ Ważna informacja (Windows SmartScreen)
-
-Ponieważ instalator jest projektem fanowskim i nie posiada płatnego certyfikatu dewelopera, Windows może wyświetlić niebieskie okno z ostrzeżeniem.
-
-\* Kliknij \*\*"Więcej informacji"\*\*.
-
-\* Wybierz \*\*"Uruchom mimo to"\*\*.
-
-Plik jest w 100% bezpieczny, co możesz sprawdzić skanując go w serwisie VirusTotal.
-
-
-
-\## ☕ Wsparcie projektu
-
-Jeśli doceniasz moją pracę nad spolszczeniem, możesz postawić mi wirtualną kawę:
-
-👉 \[Postaw kawę dla Arima - buycoffee.to](https://buycoffee.to/arima)
-
-
-
----
-
-\*Autor: Arima\*
-
-\*Wersja: 0.0.8a\*
-
+Instalator bazuje na [projekcie Arimy](https://github.com/arimacold/wwm-spolszczenie). [Wsparcie autora instalatora](https://buycoffee.to/arima).
