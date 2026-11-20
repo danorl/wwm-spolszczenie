@@ -1,6 +1,9 @@
 import os
 import hashlib
+import io
 import json
+import msvcrt
+import re
 import winreg
 import requests
 import stat
@@ -9,10 +12,17 @@ import time
 import winsound
 import threading
 import shutil
+import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-import customtkinter as ctk
 from tkinter import messagebox, filedialog
+
+# CustomTkinter reports font fallback to stderr, which is absent in the windowed EXE.
+if sys.stderr is None:
+    sys.stderr = io.StringIO()
+
+import customtkinter as ctk
 
 GITHUB_USER = "danorl"
 REPO_NAME = "wwm-spolszczenie"
@@ -25,6 +35,15 @@ DATA_DIR = Path("Spolszczenie_Data", "WWMPL")
 PACKAGE_FILES = ("translate_words_map_en", "translate_words_map_en__small")
 DIFF_FILE = "translate_words_map_en_diff"
 PAYLOAD_FILES = (*PACKAGE_FILES, DIFF_FILE)
+GERMAN_FILES = ("translate_words_map_de", "translate_words_map_de__small", "translate_words_map_de_diff")
+PACKAGES = {"en": PACKAGE_FILES, "de": GERMAN_FILES}
+DIFF_FILES = {"en": DIFF_FILE, "de": GERMAN_FILES[-1]}
+LANGUAGES = {"en": "English", "de": "Deutsch"}
+CHECKSUM = re.compile(r"[0-9a-f]{64}")
+
+
+class Cancelled(Exception):
+    pass
 
 
 def sha256(path):
@@ -33,7 +52,14 @@ def sha256(path):
 
 
 def matches(path, digest):
-    return path.is_file() and sha256(path) == digest
+    return digest is not None and file_hash(path) == digest
+
+
+def file_hash(path):
+    try:
+        return sha256(path)
+    except FileNotFoundError:
+        return None
 
 
 def atomic_copy(source, target):
@@ -41,7 +67,10 @@ def atomic_copy(source, target):
     with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
         temporary = Path(stream.name)
     try:
-        shutil.copyfile(source, temporary)
+        with source.open("rb") as original, temporary.open("wb") as stream:
+            shutil.copyfileobj(original, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
         if target.exists():
             target.chmod(stat.S_IWRITE)
         temporary.replace(target)
@@ -49,11 +78,193 @@ def atomic_copy(source, target):
         temporary.unlink(missing_ok=True)
 
 
+def remove_file(target):
+    if target.exists():
+        target.chmod(stat.S_IWRITE)
+        target.unlink(missing_ok=True)
+
+
+def data_path(root, language):
+    data = root / DATA_DIR
+    return data if language == "en" else data / language
+
+
+def original_backup(data, name, digest):
+    if digest is not None:
+        for backup in (data / "backup" / digest / name, data / "backup" / name):
+            if matches(backup, digest):
+                return backup
+    return None
+
+
+def save_original(data, target, digest):
+    if original_backup(data, target.name, digest) is None:
+        backup = data / "backup" / digest / target.name
+        atomic_copy(target, backup)
+        if not matches(backup, digest):
+            raise ValueError(f"Plik {target.name} zmienił się w trakcie tworzenia kopii.")
+
+
+def library_paths(steam_path):
+    yield steam_path
+    try:
+        libraries = (steam_path / "steamapps" / "libraryfolders.vdf").read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return
+    for path in re.findall(r'^\s*"path"\s*"([^"]+)"', libraries, re.MULTILINE):
+        yield Path(path.replace("\\\\", "\\"))
+
+
+def release_manifest(payload, language):
+    files = payload["files"]
+    if set(files) != set(PAYLOAD_FILES):
+        raise ValueError("Nieprawidłowa lista plików w paczce tłumaczenia.")
+    if language == "en":
+        return {"version": payload["version"], "files": files}
+    originals = payload.get("de")
+    if originals is None:
+        directory = Path(__file__).parent if getattr(sys, "frozen", False) else Path(__file__).parents[1]
+        path = directory / "files" / "en" / "manifest.json"
+        if path.is_file():
+            bundled = json.loads(path.read_text(encoding="utf-8"))
+            if bundled["version"] == payload["version"] and bundled["files"] == files:
+                originals = bundled.get("de")
+    if not isinstance(originals, dict) or set(originals) != set(GERMAN_FILES):
+        raise ValueError("To wydanie paczki nie ma jeszcze danych zgodności języka niemieckiego.")
+    return {
+        "version": payload["version"],
+        "files": {
+            target: {"sha256": files[source]["sha256"], "original": originals[target]}
+            for target, source in zip(GERMAN_FILES, PAYLOAD_FILES)
+        },
+    }
+
+
+def validate_manifest(manifest, language):
+    expected = set(PACKAGES[language]) | {DIFF_FILES[language]}
+    if not isinstance(manifest["version"], str) or set(manifest["files"]) != expected:
+        raise ValueError("Nieprawidłowy manifest tłumaczenia.")
+    for name, info in manifest["files"].items():
+        if not CHECKSUM.fullmatch(info["sha256"]):
+            raise ValueError(f"Nieprawidłowa suma kontrolna pliku {name}.")
+        if info["original"] is None and name == GERMAN_FILES[1]:
+            continue
+        if not CHECKSUM.fullmatch(info["original"]):
+            raise ValueError(f"Nieprawidłowa suma kontrolna oryginalnego pliku {name}.")
+
+
+@contextmanager
+def game_lock(root):
+    data = root / DATA_DIR
+    data.mkdir(parents=True, exist_ok=True)
+    with (data / "operation.lock").open("a+b") as lock:
+        lock.seek(0)
+        try:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            raise ValueError("Inny instalator pracuje już na tym folderze gry.") from error
+        yield
+
+
+class Recovery:
+    def __init__(self, root):
+        self.root = root
+        self.directory = root / DATA_DIR / "recovery"
+        self.pending = self.directory / "pending.json"
+
+    def prepare(self, changes):
+        if self.pending.exists():
+            raise ValueError("Najpierw zakończ odzyskiwanie poprzedniej operacji.")
+        self.directory.mkdir(parents=True, exist_ok=True)
+        records = []
+        for index, (target, before, after) in enumerate(changes):
+            if file_hash(target) != before:
+                raise ValueError(f"Plik {target.name} zmienił się w trakcie operacji.")
+            if before is not None:
+                snapshot = self.directory / f"{index}.before"
+                atomic_copy(target, snapshot)
+                if not matches(snapshot, before):
+                    raise ValueError(f"Nie udało się zweryfikować kopii pliku {target.name}.")
+            records.append({"path": target.relative_to(self.root).as_posix(), "before": before, "after": after})
+        draft = self.directory / "pending.draft"
+        try:
+            with draft.open("w", encoding="utf-8") as stream:
+                json.dump(records, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            draft.replace(self.pending)
+        finally:
+            draft.unlink(missing_ok=True)
+
+    def finish(self):
+        self.pending.unlink(missing_ok=True)
+        for snapshot in self.directory.glob("*.before"):
+            try:
+                snapshot.unlink()
+            except OSError:
+                # Once the journal is gone, these copies are no longer needed and may be replaced.
+                pass
+
+    def recover(self):
+        if not self.pending.is_file():
+            return False
+        allowed = {data_path(self.root, language) / "manifest.json" for language in LANGUAGES}
+        allowed.update(self.root / PACKAGE_DIR / name for names in PACKAGES.values() for name in names)
+        allowed.update(self.root / DIFF_DIR / name for name in DIFF_FILES.values())
+        records = json.loads(self.pending.read_text(encoding="utf-8"))
+        targets = [self.root / record["path"] for record in records]
+        if len(set(targets)) != len(targets) or not set(targets).issubset(allowed):
+            raise ValueError("Nieprawidłowa lista plików do odzyskania.")
+        unresolved = []
+        for index in reversed(range(len(records))):
+            record, target = records[index], targets[index]
+            before = record["before"]
+            current = file_hash(target)
+            if current == before:
+                continue
+            snapshot = self.directory / f"{index}.before"
+            if current not in record["after"] or (before is not None and not matches(snapshot, before)):
+                unresolved.append(target.name)
+                continue
+            if before is None:
+                remove_file(target)
+            else:
+                atomic_copy(snapshot, target)
+        if unresolved:
+            raise ValueError(
+                "Odzyskiwanie wymaga sprawdzenia spójności plików gry. "
+                f"Zachowano pliki i kopie: {', '.join(unresolved)}."
+            )
+        self.finish()
+        return True
+
+    def apply(self, changes, check_cancelled):
+        changes = [change for change in changes if change[1] != change[3]]
+        if not changes:
+            return
+        check_cancelled()
+        self.prepare((target, before, [after]) for target, before, _, after in changes)
+        try:
+            for target, before, source, _ in changes:
+                check_cancelled()
+                if file_hash(target) != before:
+                    raise ValueError(f"Plik {target.name} zmienił się w trakcie operacji.")
+                if source is None:
+                    remove_file(target)
+                else:
+                    atomic_copy(source, target)
+            check_cancelled()
+            self.finish()
+        except Exception:
+            self.recover()
+            raise
+
+
 class WWMInstaller(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Where Winds Meet - Instalator")
-        self.geometry("600x690")
+        self.geometry("600x750")
         ctk.set_appearance_mode("dark")
         
         try:
@@ -62,26 +273,38 @@ class WWMInstaller(ctk.CTk):
             pass
 
         self.version_var = ctk.StringVar(value="steam")
+        self.language_var = ctk.StringVar(value="en")
+        self.cancelled = threading.Event()
+        self.busy = False
+        self.closing = False
         self.game_path = self.find_game_path()
         
         self.setup_ui()
-        self.update_status()
+        self.protocol("WM_DELETE_WINDOW", self.request_close)
+        self.after(0, self.update_status)
 
     def is_valid_game_path(self, path):
-        if not path: return False
-        return os.path.exists(os.path.join(path, "Package"))
+        return bool(path and (Path(path) / PACKAGE_DIR).is_dir())
 
     def find_game_path(self):
         v = self.version_var.get()
         path = None
         if v == "steam":
-            try:
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam")
-                steam_path = winreg.QueryValueEx(key, "SteamPath")[0]
-                steam_game = os.path.join(steam_path, "steamapps", "common", "Where Winds Meet")
-                if self.is_valid_game_path(steam_game):
-                    path = steam_game
-            except: pass
+            locations = (
+                (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Valve\Steam", "InstallPath"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\Valve\Steam", "InstallPath"),
+            )
+            for hive, key_name, value in locations:
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        steam_path = Path(winreg.QueryValueEx(key, value)[0])
+                except OSError:
+                    continue
+                for library in library_paths(steam_path):
+                    candidate = library / "steamapps" / "common" / "Where Winds Meet"
+                    if self.is_valid_game_path(candidate):
+                        return str(candidate.resolve())
         else:
             potential = [
                 r"C:\Program Files\wwm\wwm_standard", r"C:\Program Files\wwm\wwm_lite",
@@ -138,8 +361,19 @@ class WWMInstaller(ctk.CTk):
                             hover_color="#5fa3d9", border_width_checked=6)
         self.rb_launcher.pack(side="right", padx=60, pady=10)
 
-        ctk.CTkLabel(self, text="W ustawieniach gry wybierz język English.",
-                     font=("Segoe UI", 13)).pack(pady=8)
+        language_frame = ctk.CTkFrame(self, fg_color="#2b2b2b", corner_radius=10)
+        language_frame.pack(pady=8, padx=40, fill="x")
+        ctk.CTkLabel(language_frame, text="Język gry do zastąpienia", font=("Segoe UI", 13)).pack(pady=5)
+        language_buttons = ctk.CTkFrame(language_frame, fg_color="transparent")
+        language_buttons.pack(pady=(1, 10))
+        self.rb_en = ctk.CTkRadioButton(language_buttons, text="Angielski (EN)", variable=self.language_var,
+                                        value="en", command=self.update_status)
+        self.rb_en.pack(side="left", padx=24)
+        self.rb_de = ctk.CTkRadioButton(language_buttons, text="Niemiecki (DE)", variable=self.language_var,
+                                        value="de", command=self.update_status)
+        self.rb_de.pack(side="left", padx=24)
+        self.language_hint = ctk.CTkLabel(self, font=("Segoe UI", 13))
+        self.language_hint.pack(pady=4)
 
         self.status_box = ctk.CTkFrame(self, fg_color="#1e1e1e", corner_radius=10)
         self.status_box.pack(pady=8, padx=40, fill="x")
@@ -187,27 +421,42 @@ class WWMInstaller(ctk.CTk):
         self.after(0, self._set_progress, val, detail_text)
 
     def _set_progress(self, val, detail_text):
+        if self.closing:
+            return
         self.progress.set(val)
         self.percentage_label.configure(text=f"{int(val * 100)}%")
         self.detail_label.configure(text=detail_text)
 
     def ui_msg_info(self, title, msg):
-        self.after(0, lambda: messagebox.showinfo(title, msg))
+        self.after(0, lambda: not self.closing and messagebox.showinfo(title, msg))
 
     def ui_msg_error(self, title, msg):
-        self.after(0, lambda: messagebox.showerror(title, msg))
+        self.after(0, lambda: not self.closing and messagebox.showerror(title, msg))
 
     def update_status(self):
+        if self.closing:
+            return
+        language = self.language_var.get()
+        self.language_hint.configure(text=f"W ustawieniach gry wybierz {LANGUAGES[language]}.")
         if not self.game_path:
             self.local_ver_label.configure(text="NIE ODNALEZIONO GRY!", text_color="#e74c3c")
+            self.server_ver_label.configure(text="Wskaż folder gry.")
             return
-        
-        manifest_path = Path(self.game_path) / DATA_DIR / "manifest.json"
-        local_v = None
+
         try:
-            local_v = json.loads(manifest_path.read_text(encoding="utf-8"))["version"]
-        except (OSError, ValueError, KeyError):
-            pass
+            root = Path(self.game_path)
+            recovery = Recovery(root)
+            if recovery.pending.exists():
+                with game_lock(root):
+                    if recovery.recover():
+                        self._set_progress(0, "Odzyskano pliki po przerwanej operacji.")
+            local = self.local_manifest(data_path(root, language), language)
+            complete = local is not None and self.has_installed_files(root, language, local["files"])
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.local_ver_label.configure(text="SPRAWDŹ STAN INSTALACJI", text_color="#ff4d4d")
+            self.server_ver_label.configure(text="Sprawdzenie plików wymaga uwagi.")
+            self.ui_msg_error("Sprawdzanie plików", str(error))
+            return
         
         try:
             r = requests.get(f"{RAW_URL}version.txt", timeout=5)
@@ -216,8 +465,11 @@ class WWMInstaller(ctk.CTk):
         except requests.RequestException:
             server_v = None
 
-        if local_v is None:
+        local_v = local["version"] if local else None
+        if local is None:
             self.local_ver_label.configure(text="STATUS: BRAK SPOLSZCZENIA!", text_color="#ff4d4d")
+        elif not complete:
+            self.local_ver_label.configure(text="WYMAGA PONOWNEJ INSTALACJI", text_color="#f1c40f")
         elif not server_v:
             self.local_ver_label.configure(text=f"ZAINSTALOWANO ({local_v})", text_color="#f1c40f")
         elif server_v != local_v:
@@ -230,6 +482,8 @@ class WWMInstaller(ctk.CTk):
         self.after(0, self._show_finish_screen)
 
     def _show_finish_screen(self):
+        if self.closing:
+            return
         winsound.MessageBeep(winsound.MB_ICONASTERISK)
         finish_win = ctk.CTkToplevel(self)
         finish_win.title("Instalacja zakończona")
@@ -243,33 +497,65 @@ class WWMInstaller(ctk.CTk):
                        command=lambda: webbrowser.open(COFFEE_URL)).pack(pady=20)
 
     def run_install(self):
-        self.toggle_buttons(False)
-        threading.Thread(target=self.install_logic, args=(self.game_path,), daemon=True).start()
+        self.begin_work(self.install_logic, self.game_path, False, self.language_var.get())
 
     def run_restore(self):
-        self.toggle_buttons(False)
-        threading.Thread(target=self.install_logic, args=(self.game_path, True), daemon=True).start()
+        self.begin_work(self.install_logic, self.game_path, True, self.language_var.get())
 
     def run_launch(self):
+        self.begin_work(self.launch_and_patch, self.game_path, self.version_var.get(), self.language_var.get())
+
+    def begin_work(self, action, *args):
+        if self.busy:
+            return
+        self.busy = True
+        self.cancelled.clear()
         self.toggle_buttons(False)
-        args = (self.game_path, self.version_var.get())
-        threading.Thread(target=self.launch_and_patch, args=args, daemon=True).start()
+        threading.Thread(target=action, args=args, daemon=True).start()
+
+    def request_close(self):
+        if self.busy:
+            self._set_progress(0, "Anulowanie operacji i odzyskiwanie plików…")
+            self.closing = True
+            self.cancelled.set()
+        else:
+            self.destroy()
+
+    def check_cancelled(self):
+        if self.cancelled.is_set():
+            raise Cancelled()
 
     def toggle_buttons(self, state=True):
         value = "normal" if state else "disabled"
         for control in (self.btn_install, self.btn_restore, self.btn_launch,
-                        self.btn_browse, self.rb_steam, self.rb_launcher):
+                        self.btn_browse, self.rb_steam, self.rb_launcher, self.rb_en, self.rb_de):
             control.configure(state=value)
+
+    def local_manifest(self, data, language):
+        path = data / "manifest.json"
+        if not path.is_file():
+            return None
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        validate_manifest(manifest, language)
+        return manifest
+
+    def has_installed_files(self, root, language, files):
+        digest = files[DIFF_FILES[language]]["sha256"]
+        return all(matches(root / PACKAGE_DIR / name, files[name]["sha256"]) for name in PACKAGES[language]) and (
+            matches(data_path(root, language) / "payload" / (digest + ".pol"), digest)
+        )
 
     def download_file(self, name, target, index, file_info):
         parts = file_info.get("parts", [name])
         with target.open("wb") as stream:
             for part_index, part in enumerate(parts):
+                self.check_cancelled()
                 with requests.get(f"{RAW_URL}files/en/{part}", stream=True, timeout=30) as response:
                     response.raise_for_status()
                     total = int(response.headers.get("Content-Length", 0))
                     downloaded = 0
                     for chunk in response.iter_content(chunk_size=256 * 1024):
+                        self.check_cancelled()
                         stream.write(chunk)
                         downloaded += len(chunk)
                         fraction = downloaded / total if total else 0
@@ -279,143 +565,186 @@ class WWMInstaller(ctk.CTk):
         if not matches(target, file_info["sha256"]):
             raise ValueError(f"Nieprawidłowa suma kontrolna pliku {name}.")
 
-    def install_logic(self, game_path, restore=False):
+    def install_logic(self, game_path, restore=False, language="en"):
         try:
             if not game_path:
                 raise ValueError("Wskaż główny folder gry.")
             root = Path(game_path)
-            data = root / DATA_DIR
-            manifest_path = data / "manifest.json"
-            previous = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else None
-            if restore:
-                if previous is None:
-                    raise ValueError("Brak zapisanej instalacji WWMPL. Możesz sprawdzić spójność plików w launcherze gry.")
-                self.restore_files(root, data, previous["files"])
-                manifest_path.unlink()
-                self.set_progress(1.0, "Przywrócono oryginalne pliki.")
-                self.ui_msg_info("Przywrócono", "Przywrócono oryginalne pliki wersji angielskiej.")
-            else:
-                self.install_files(root, data, previous)
-                self.set_progress(1.0, "Zainstalowano. W grze wybierz English.")
-                self.show_finish_screen()
+            data = data_path(root, language)
+            with game_lock(root):
+                recovery = Recovery(root)
+                recovered = recovery.recover()
+                previous = self.local_manifest(data, language)
+                if restore:
+                    if previous is None and not recovered:
+                        raise ValueError("Brak zapisanej instalacji WWMPL dla tego języka.")
+                    skipped = self.restore_files(root, data, previous["files"], language) if previous else []
+                else:
+                    self.install_files(root, data, previous, language)
+
             self.after(0, self.update_status)
-        except (OSError, ValueError, KeyError, requests.RequestException) as error:
+            if restore and skipped:
+                self.set_progress(0, "Przywracanie wymaga sprawdzenia plików.")
+                self.ui_msg_error(
+                    "Przywracanie niekompletne",
+                    f"Zachowano pliki i dane instalacji: {', '.join(skipped)}. "
+                    "Sprawdź spójność plików gry w Steam lub launcherze.",
+                )
+            elif restore:
+                self.set_progress(1.0, "Przywrócono oryginalne pliki.")
+                self.ui_msg_info("Przywrócono", "Przywrócono oryginalne pliki wybranego języka.")
+            else:
+                self.set_progress(1.0, f"Zainstalowano. W grze wybierz {LANGUAGES[language]}.")
+                self.show_finish_screen()
+        except Cancelled:
+            self.set_progress(0, "Anulowano operację.")
+        except (OSError, ValueError, KeyError, TypeError, requests.RequestException) as error:
             self.set_progress(0, "Operacja nie powiodła się.")
             self.ui_msg_error("Błąd", str(error))
         finally:
             self.after(0, self.reset_buttons)
 
-    def install_files(self, root, data, previous):
+    def install_files(self, root, data, previous, language="en"):
+        self.check_cancelled()
         response = requests.get(f"{RAW_URL}files/en/manifest.json", timeout=10)
         response.raise_for_status()
-        manifest = response.json()
-        if set(manifest["files"]) != set(PAYLOAD_FILES):
-            raise ValueError("Nieprawidłowa lista plików w pakiecie.")
+        payload = response.json()
+        validate_manifest(release_manifest(payload, "en"), "en")
+        manifest = release_manifest(payload, language)
+        validate_manifest(manifest, language)
         files = manifest["files"]
+        previous_files = previous["files"] if previous else {}
+        names = PACKAGES[language]
+        sources = dict(zip(names, PAYLOAD_FILES))
         data.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=data) as directory:
             staging = Path(directory)
-            targets = {}
-            for name in PACKAGE_FILES:
+            changes = []
+            for name in names:
+                self.check_cancelled()
                 target = root / PACKAGE_DIR / name
-                backup = data / "backup" / name
-                original = files[name]["original"]
-                if matches(target, original):
-                    if not matches(backup, original):
-                        atomic_copy(target, backup)
+                info = files[name]
+                original = info["original"]
+                current = file_hash(target)
+                if current == original:
+                    if original is not None:
+                        save_original(data, target, original)
                 elif not (
-                    matches(backup, original)
-                    and (matches(target, files[name]["sha256"])
-                         or (previous and matches(target, previous["files"][name]["sha256"])))
+                    current is not None
+                    and current in (info["sha256"], previous_files.get(name, {}).get("sha256"))
+                    and (original is None or original_backup(data, name, original) is not None)
                 ):
-                    raise ValueError(f"Niezgodna wersja pliku {name}. Sprawdź spójność plików gry przed instalacją.")
-                targets[name] = target
+                    raise ValueError(f"Niezgodna wersja pliku {name}. Sprawdź spójność plików gry.")
+                changes.append((target, current, staging / sources[name], info["sha256"]))
 
-            diff = root / DIFF_DIR / DIFF_FILE
-            diff_backup = data / "backup" / DIFF_FILE
-            if previous and files[DIFF_FILE]["sha256"] != previous["files"][DIFF_FILE]["sha256"]:
-                if matches(diff, previous["files"][DIFF_FILE]["sha256"]):
-                    if not matches(diff_backup, files[DIFF_FILE]["original"]):
+            diff_name = DIFF_FILES[language]
+            diff_info = files[diff_name]
+            previous_diff = previous_files.get(diff_name)
+            if previous_diff and diff_info["sha256"] != previous_diff["sha256"]:
+                target = root / DIFF_DIR / diff_name
+                if matches(target, previous_diff["sha256"]):
+                    original = diff_info["original"]
+                    backup = original_backup(data, diff_name, original)
+                    if backup is None:
                         raise ValueError("Brak aktualnej kopii pliku różnicowego. Sprawdź spójność plików gry.")
-                    targets[DIFF_FILE] = diff
+                    changes.append((target, previous_diff["sha256"], backup, original))
 
             for index, name in enumerate(PAYLOAD_FILES):
-                self.download_file(name, staging / name, index, files[name])
+                self.download_file(name, staging / name, index, payload["files"][name])
 
-            # Przy błędzie zapisu przywróć zawartość sprzed tej operacji.
-            for name, target in targets.items():
-                shutil.copyfile(target, staging / (name + ".previous"))
-            updated = []
-            try:
-                for name, target in targets.items():
-                    atomic_copy(diff_backup if name == DIFF_FILE else staging / name, target)
-                    updated.append(name)
-                cached_diff = data / "payload" / (files[DIFF_FILE]["sha256"] + ".pol")
+            cached_diff = data / "payload" / (diff_info["sha256"] + ".pol")
+            if not matches(cached_diff, diff_info["sha256"]):
                 atomic_copy(staging / DIFF_FILE, cached_diff)
-                staged_manifest = staging / "manifest.json"
-                staged_manifest.write_text(json.dumps(manifest), encoding="utf-8")
-                atomic_copy(staged_manifest, data / "manifest.json")
-            except OSError:
-                for name in reversed(updated):
-                    atomic_copy(staging / (name + ".previous"), targets[name])
-                raise
+            staged_manifest = staging / "manifest.json"
+            staged_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+            target_manifest = data / "manifest.json"
+            changes.append((target_manifest, file_hash(target_manifest), staged_manifest, sha256(staged_manifest)))
+            self.set_progress(0.90, "Zapisywanie plików gry…")
+            Recovery(root).apply(changes, self.check_cancelled)
 
-    def restore_files(self, root, data, files):
-        originals = {}
-        for name in PACKAGE_FILES:
+    def restore_files(self, root, data, files, language="en"):
+        changes = []
+        skipped = []
+        for name in PACKAGES[language]:
             target = root / PACKAGE_DIR / name
-            if matches(target, files[name]["sha256"]) or not target.exists():
-                backup = data / "backup" / name
-                if not matches(backup, files[name]["original"]):
-                    raise ValueError(f"Brak właściwej kopii pliku {name}. Sprawdź spójność plików gry.")
-                originals[target] = backup
-        for target, backup in originals.items():
-            atomic_copy(backup, target)
+            info = files[name]
+            current = file_hash(target)
+            original = info["original"]
+            if current == original:
+                continue
+            if current not in (None, info["sha256"]):
+                skipped.append(name)
+                continue
+            backup = original_backup(data, name, original)
+            if original is not None and backup is None:
+                skipped.append(name)
+                continue
+            changes.append((target, current, backup, original))
 
-        diff = root / DIFF_DIR / DIFF_FILE
-        if matches(diff, files[DIFF_FILE]["sha256"]):
-            backup = data / "backup" / DIFF_FILE
-            if matches(backup, files[DIFF_FILE]["original"]):
-                atomic_copy(backup, diff)
-            else:
-                diff.chmod(stat.S_IWRITE)
-                diff.unlink()
+        diff_name = DIFF_FILES[language]
+        diff = root / DIFF_DIR / diff_name
+        info = files[diff_name]
+        current = file_hash(diff)
+        if current != info["original"]:
+            backup = original_backup(data, diff_name, info["original"])
+            if backup is not None and (current == info["sha256"] or (current is None and language == "en")):
+                changes.append((diff, current, backup, info["original"]))
+            elif current is not None:
+                skipped.append(f"{diff_name} (LocalData)")
 
-    def launch_and_patch(self, game_path, platform):
+        if not skipped:
+            manifest = data / "manifest.json"
+            changes.append((manifest, file_hash(manifest), None, None))
+        Recovery(root).apply(changes, self.check_cancelled)
+        return skipped
+
+    def launch_and_patch(self, game_path, platform, language="en"):
         try:
             if not game_path:
                 raise ValueError("Wskaż główny folder gry.")
             root = Path(game_path)
-            data = root / DATA_DIR
-            manifest = data / "manifest.json"
-            if not manifest.is_file():
-                raise ValueError("Najpierw zainstaluj spolszczenie.")
-            files = json.loads(manifest.read_text(encoding="utf-8"))["files"]
-            for name in PACKAGE_FILES:
-                if not matches(root / PACKAGE_DIR / name, files[name]["sha256"]):
-                    raise ValueError("Pliki gry uległy zmianie. Użyj przycisku ZAINSTALUJ / AKTUALIZUJ.")
-            diff_info = files[DIFF_FILE]
-            source = data / "payload" / (diff_info["sha256"] + ".pol")
-            if not matches(source, diff_info["sha256"]):
-                raise ValueError("Brak pliku różnicowego. Zainstaluj ponownie spolszczenie.")
-            target = root / DIFF_DIR / DIFF_FILE
-            backup = data / "backup" / DIFF_FILE
-            if target.exists():
-                if matches(target, diff_info["original"]):
-                    atomic_copy(target, backup)
-                elif not matches(target, diff_info["sha256"]):
-                    raise ValueError("Niezgodna wersja angielskiego pliku różnicowego. Sprawdź spójność plików gry.")
-                target.chmod(stat.S_IWRITE)
-                target.unlink()
+            data = data_path(root, language)
+            with game_lock(root):
+                recovery = Recovery(root)
+                recovery.recover()
+                manifest = self.local_manifest(data, language)
+                if manifest is None:
+                    raise ValueError("Najpierw zainstaluj spolszczenie dla wybranego języka.")
+                files = manifest["files"]
+                if not self.has_installed_files(root, language, files):
+                    raise ValueError("Brakuje plików tłumaczenia lub uległy zmianie. Zainstaluj spolszczenie ponownie.")
+                diff_name = DIFF_FILES[language]
+                info = files[diff_name]
+                target = root / DIFF_DIR / diff_name
+                source = data / "payload" / (info["sha256"] + ".pol")
+                current = file_hash(target)
+                if current == info["original"]:
+                    save_original(data, target, current)
+                elif current == info["sha256"]:
+                    if original_backup(data, diff_name, info["original"]) is None:
+                        raise ValueError("Brak zweryfikowanej kopii pliku różnicowego. Sprawdź spójność plików gry.")
+                elif current is not None:
+                    raise ValueError("Niezgodna wersja pliku różnicowego. Sprawdź spójność plików gry.")
 
-            self.set_progress(0.10, "Uruchamianie gry...")
-            try:
-                self.start_game(game_path, platform)
-                self._watcher_thread(target, source, backup, diff_info)
-            finally:
-                if not target.exists() and matches(backup, diff_info["original"]):
-                    atomic_copy(backup, target)
-        except (OSError, ValueError, KeyError) as error:
+                self.check_cancelled()
+                try:
+                    if current is not None:
+                        recovery.prepare([(target, current, [None, info["original"], info["sha256"]])])
+                        self.check_cancelled()
+                        if file_hash(target) != current:
+                            raise ValueError(f"Plik {target.name} zmienił się w trakcie uruchamiania.")
+                        remove_file(target)
+                    self.set_progress(0.10, "Uruchamianie gry…")
+                    self.start_game(game_path, platform)
+                    self._watcher_thread(target, source, data, info, recovery, language, current is None)
+                    self.check_cancelled()
+                    recovery.finish()
+                except Exception:
+                    recovery.recover()
+                    raise
+        except Cancelled:
+            self.set_progress(0, "Anulowano uruchamianie. Odzyskano pliki.")
+        except (OSError, ValueError, KeyError, TypeError) as error:
             self.set_progress(0, "Nie udało się zastosować spolszczenia.")
             self.ui_msg_error("Błąd uruchamiania", str(error))
         finally:
@@ -432,11 +761,11 @@ class WWMInstaller(ctk.CTk):
             exe_path = None
             
             for root, dirs, files in os.walk(game_path):
-                if root[len(self.game_path):].count(os.sep) > 3:
-                    continue
-                for file in files:
-                    if file in exe_names:
-                        exe_path = os.path.join(root, file)
+                if len(Path(root).relative_to(game_path).parts) >= 3:
+                    dirs.clear()
+                for name in exe_names:
+                    if name in files:
+                        exe_path = os.path.join(root, name)
                         break
                 if exe_path:
                     break
@@ -449,17 +778,21 @@ class WWMInstaller(ctk.CTk):
             else:
                 self.ui_msg_info("Informacja", "Nie znaleziono pliku .exe. Uruchom grę ręcznie ze swojej platformy.")
 
-    def _watcher_thread(self, target, source, backup, file_info):
+    def _watcher_thread(self, target, source, data, file_info, recovery, language, initially_missing):
         self.set_progress(0.30, "Czekam na plik gry. Jeśli gra nie wystartowała, uruchom ją ręcznie.")
-        deadline = time.monotonic() + 300
+        start = time.monotonic()
+        deadline = start + 300
+        fallback_deadline = start + 8 if language == "de" and initially_missing else None
         last_signature = None
         stable_since = None
         patched_since = None
         while time.monotonic() < deadline:
-            time.sleep(0.1)
+            self.cancelled.wait(0.1)
+            self.check_cancelled()
             now = time.monotonic()
             try:
                 info = target.stat()
+                fallback_deadline = None
                 signature = (info.st_size, info.st_mtime_ns)
                 if signature != last_signature:
                     last_signature = signature
@@ -468,7 +801,7 @@ class WWMInstaller(ctk.CTk):
                     continue
                 if patched_since is not None:
                     if now - patched_since >= 8:
-                        self.set_progress(1.0, "Zastosowano spolszczenie. W grze wybierz English.")
+                        self.set_progress(1.0, f"Plik różnicowy podmieniony. W grze wybierz {LANGUAGES[language]}.")
                         return
                     continue
                 if now - stable_since < 0.5:
@@ -477,20 +810,35 @@ class WWMInstaller(ctk.CTk):
                 if digest == file_info["sha256"]:
                     patched_since = now
                 elif digest == file_info["original"]:
-                    if not matches(backup, file_info["original"]):
-                        atomic_copy(target, backup)
+                    save_original(data, target, digest)
+                    if not recovery.pending.exists():
+                        recovery.prepare([(target, digest, [None, file_info["sha256"]])])
+                    self.check_cancelled()
+                    if file_hash(target) != digest:
+                        last_signature = None
+                        continue
                     atomic_copy(source, target)
                     info = target.stat()
                     last_signature = (info.st_size, info.st_mtime_ns)
                     patched_since = now
                     self.set_progress(0.80, "Sprawdzam, czy spolszczenie pozostaje aktywne...")
+            except FileNotFoundError:
+                if fallback_deadline is not None and now >= fallback_deadline:
+                    self.set_progress(1.0, "Spolszczenie jest w plikach gry. W ustawieniach wybierz Deutsch.")
+                    return
+                last_signature = None
+                patched_since = None
             except OSError:
                 last_signature = None
                 patched_since = None
         raise ValueError("Nie potwierdzono podmiany. Sprawdź, czy gra jest uruchomiona i ma zgodną wersję.")
 
     def reset_buttons(self):
-        self.toggle_buttons(True)
+        self.busy = False
+        if self.closing:
+            self.destroy()
+        else:
+            self.toggle_buttons(True)
 
 if __name__ == "__main__":
     app = WWMInstaller()

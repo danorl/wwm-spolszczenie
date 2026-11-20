@@ -17,5 +17,10 @@
       "sha256": "7c42d37f7213d9c5acaba1a6b124315c04c9c22516f76fb27be99b8060ed53d7",
       "original": "b25ce2a3e256368bc88119a21e3a251199b00e5152dbbf7b14312099e1fa6d45"
     }
+  },
+  "de": {
+    "translate_words_map_de": "c87f57b5f986a686b3d4ea907ac1076b17038f4c8e9b0c832263fbdd298af07a",
+    "translate_words_map_de__small": null,
+    "translate_words_map_de_diff": "57c5325b62223bd43f6fde89be861bf02561373cf51b0b477eb670347ff6b187"
   }
 }

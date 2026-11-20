@@ -1,13 +1,13 @@
 # Where Winds Meet — instalator spolszczenia WWMPL
 
-Paczka **2.4-2026-11-19-r3** zastępuje angielskie teksty gry polskim tłumaczeniem. Instalator obsługuje Steam oraz Epic / Launcher. W r3 uzupełniono 45 kwestii i opcji dialogowych.
+Paczka **2.4-2026-11-19-r3** udostępnia to samo polskie tłumaczenie pod językiem angielskim lub niemieckim. Instalator obsługuje Steam oraz Epic / Launcher. W r3 uzupełniono 45 kwestii i opcji dialogowych.
 
 1. Pobierz i uruchom [Instalator-WWMPL.exe](https://raw.githubusercontent.com/danorl/wwm-spolszczenie/main/Instalator/Instalator-WWMPL.exe).
-2. Wybierz platformę i wskaż główny folder gry, jeśli instalator go nie wykrył.
+2. Wybierz platformę oraz język gry do zastąpienia. Wskaż główny folder gry, jeśli instalator go nie wykrył.
 3. Zamknij grę i kliknij **ZAINSTALUJ / AKTUALIZUJ**.
-4. Kliknij **URUCHOM GRĘ (PL)**. Zostaw instalator otwarty do potwierdzenia podmiany. W ustawieniach gry wybierz **English**.
+4. Kliknij **URUCHOM GRĘ (PL)** i zaczekaj na komunikat instalatora. W ustawieniach gry wybierz **English** dla EN lub **Deutsch** dla DE.
 
-**PRZYWRÓĆ ORYGINALNE TŁUMACZENIE** korzysta z kopii zapisanych w folderze `Spolszczenie_Data/WWMPL` wewnątrz katalogu gry. Przy niezgodnej wersji plików użyj funkcji weryfikacji plików gry w Steam lub w launcherze.
+**PRZYWRÓĆ ORYGINALNE TŁUMACZENIE** przywraca pliki wybranego języka z kopii w folderze `Spolszczenie_Data/WWMPL` wewnątrz katalogu gry. Po przerwaniu operacji otwórz ponownie instalator i wskaż ten sam katalog gry, aby odzyskać pliki. Przy niezgodnej wersji plików użyj funkcji weryfikacji plików gry w Steam lub w launcherze.
 
 ## Uruchomienie ze źródeł
 
