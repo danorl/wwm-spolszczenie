@@ -14,6 +14,7 @@ import threading
 import shutil
 import sys
 import tempfile
+from zipfile import ZipFile, BadZipFile
 from contextlib import contextmanager
 from pathlib import Path
 from tkinter import messagebox, filedialog
@@ -39,7 +40,10 @@ GERMAN_FILES = ("translate_words_map_de", "translate_words_map_de__small", "tran
 PACKAGES = {"en": PACKAGE_FILES, "de": GERMAN_FILES}
 DIFF_FILES = {"en": DIFF_FILE, "de": GERMAN_FILES[-1]}
 LANGUAGES = {"en": "English", "de": "Deutsch"}
+EDITIONS = {"basic": "Podstawowa", "extended": "Rozszerzona"}
+RELEASE_URL = f"https://github.com/{GITHUB_USER}/{REPO_NAME}/releases/download"
 CHECKSUM = re.compile(r"[0-9a-f]{64}")
+RELEASE_TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,79}")
 
 
 class Cancelled(Exception):
@@ -119,8 +123,13 @@ def release_manifest(payload, language):
     files = payload["files"]
     if set(files) != set(PAYLOAD_FILES):
         raise ValueError("Nieprawidłowa lista plików w paczce tłumaczenia.")
+    identity = {"version": payload["version"]}
+    if "edition" in payload:
+        if payload["edition"] not in EDITIONS:
+            raise ValueError("Nieznana wersja spolszczenia.")
+        identity["edition"] = payload["edition"]
     if language == "en":
-        return {"version": payload["version"], "files": files}
+        return {**identity, "files": files}
     originals = payload.get("de")
     if originals is None:
         directory = Path(__file__).parent if getattr(sys, "frozen", False) else Path(__file__).parents[1]
@@ -132,12 +141,27 @@ def release_manifest(payload, language):
     if not isinstance(originals, dict) or set(originals) != set(GERMAN_FILES):
         raise ValueError("To wydanie paczki nie ma jeszcze danych zgodności języka niemieckiego.")
     return {
-        "version": payload["version"],
+        **identity,
         "files": {
             target: {"sha256": files[source]["sha256"], "original": originals[target]}
             for target, source in zip(GERMAN_FILES, PAYLOAD_FILES)
         },
     }
+
+
+def fetch_edition(edition, timeout=10):
+    if edition not in EDITIONS:
+        raise ValueError("Wybierz wersję podstawową lub rozszerzoną.")
+    response = requests.get(f"{RAW_URL}files/editions.json", timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()["editions"][edition]
+    archive = payload["archive"]
+    if (payload["edition"] != edition or not RELEASE_TAG.fullmatch(archive["tag"])
+            or not CHECKSUM.fullmatch(archive["sha256"])
+            or not isinstance(archive["size"], int) or archive["size"] <= 0):
+        raise ValueError("Nieprawidłowe dane paczki wybranej wersji.")
+    validate_manifest(release_manifest(payload, "en"), "en")
+    return payload
 
 
 def validate_manifest(manifest, language):
@@ -264,7 +288,7 @@ class WWMInstaller(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Where Winds Meet - Instalator")
-        self.geometry("600x750")
+        self.geometry("600x830")
         ctk.set_appearance_mode("dark")
         
         try:
@@ -274,6 +298,7 @@ class WWMInstaller(ctk.CTk):
 
         self.version_var = ctk.StringVar(value="steam")
         self.language_var = ctk.StringVar(value="en")
+        self.edition_var = ctk.StringVar(value="basic")
         self.cancelled = threading.Event()
         self.busy = False
         self.closing = False
@@ -375,6 +400,18 @@ class WWMInstaller(ctk.CTk):
         self.language_hint = ctk.CTkLabel(self, font=("Segoe UI", 13))
         self.language_hint.pack(pady=4)
 
+        editions_frame = ctk.CTkFrame(self, fg_color="#2b2b2b", corner_radius=10)
+        editions_frame.pack(pady=8, padx=40, fill="x")
+        ctk.CTkLabel(editions_frame, text="Wersja spolszczenia", font=("Segoe UI", 13)).pack(pady=5)
+        editions_buttons = ctk.CTkFrame(editions_frame, fg_color="transparent")
+        editions_buttons.pack(pady=(1, 10))
+        self.rb_basic = ctk.CTkRadioButton(editions_buttons, text="Podstawowa", variable=self.edition_var,
+                                           value="basic", command=self.update_status)
+        self.rb_basic.pack(side="left", padx=24)
+        self.rb_extended = ctk.CTkRadioButton(editions_buttons, text="Rozszerzona", variable=self.edition_var,
+                                              value="extended", command=self.update_status)
+        self.rb_extended.pack(side="left", padx=24)
+
         self.status_box = ctk.CTkFrame(self, fg_color="#1e1e1e", corner_radius=10)
         self.status_box.pack(pady=8, padx=40, fill="x")
         self.local_ver_label = ctk.CTkLabel(self.status_box, text="Twoja wersja: Sprawdzanie...", font=("Segoe UI", 15, "bold"))
@@ -437,6 +474,7 @@ class WWMInstaller(ctk.CTk):
         if self.closing:
             return
         language = self.language_var.get()
+        edition = self.edition_var.get()
         self.language_hint.configure(text=f"W ustawieniach gry wybierz {LANGUAGES[language]}.")
         if not self.game_path:
             self.local_ver_label.configure(text="NIE ODNALEZIONO GRY!", text_color="#e74c3c")
@@ -459,10 +497,8 @@ class WWMInstaller(ctk.CTk):
             return
         
         try:
-            r = requests.get(f"{RAW_URL}version.txt", timeout=5)
-            r.raise_for_status()
-            server_v = r.text.strip()
-        except requests.RequestException:
+            server_v = fetch_edition(edition, timeout=5)["version"]
+        except (requests.RequestException, ValueError, KeyError, TypeError):
             server_v = None
 
         local_v = local["version"] if local else None
@@ -470,13 +506,16 @@ class WWMInstaller(ctk.CTk):
             self.local_ver_label.configure(text="STATUS: BRAK SPOLSZCZENIA!", text_color="#ff4d4d")
         elif not complete:
             self.local_ver_label.configure(text="WYMAGA PONOWNEJ INSTALACJI", text_color="#f1c40f")
+        elif local.get("edition", "basic") != edition:
+            installed = EDITIONS.get(local.get("edition", "basic"), local_v)
+            self.local_ver_label.configure(text=f"ZAINSTALOWANO: {installed.upper()}", text_color="#f1c40f")
         elif not server_v:
             self.local_ver_label.configure(text=f"ZAINSTALOWANO ({local_v})", text_color="#f1c40f")
         elif server_v != local_v:
             self.local_ver_label.configure(text=f"DOSTĘPNA AKTUALIZACJA (Masz: {local_v})", text_color="#f1c40f")
         else:
             self.local_ver_label.configure(text=f"TŁUMACZENIE AKTUALNE ({local_v})", text_color="#2ecc71")
-        self.server_ver_label.configure(text=f"Najnowsza wersja na serwerze: {server_v or 'brak połączenia'}")
+        self.server_ver_label.configure(text=f"{EDITIONS[edition]} na serwerze: {server_v or 'brak połączenia'}")
 
     def show_finish_screen(self):
         self.after(0, self._show_finish_screen)
@@ -497,13 +536,14 @@ class WWMInstaller(ctk.CTk):
                        command=lambda: webbrowser.open(COFFEE_URL)).pack(pady=20)
 
     def run_install(self):
-        self.begin_work(self.install_logic, self.game_path, False, self.language_var.get())
+        self.begin_work(self.install_logic, self.game_path, False, self.language_var.get(), self.edition_var.get())
 
     def run_restore(self):
         self.begin_work(self.install_logic, self.game_path, True, self.language_var.get())
 
     def run_launch(self):
-        self.begin_work(self.launch_and_patch, self.game_path, self.version_var.get(), self.language_var.get())
+        self.begin_work(self.launch_and_patch, self.game_path, self.version_var.get(),
+                        self.language_var.get(), self.edition_var.get())
 
     def begin_work(self, action, *args):
         if self.busy:
@@ -528,7 +568,8 @@ class WWMInstaller(ctk.CTk):
     def toggle_buttons(self, state=True):
         value = "normal" if state else "disabled"
         for control in (self.btn_install, self.btn_restore, self.btn_launch,
-                        self.btn_browse, self.rb_steam, self.rb_launcher, self.rb_en, self.rb_de):
+                        self.btn_browse, self.rb_steam, self.rb_launcher, self.rb_en, self.rb_de,
+                        self.rb_basic, self.rb_extended):
             control.configure(state=value)
 
     def local_manifest(self, data, language):
@@ -565,7 +606,41 @@ class WWMInstaller(ctk.CTk):
         if not matches(target, file_info["sha256"]):
             raise ValueError(f"Nieprawidłowa suma kontrolna pliku {name}.")
 
-    def install_logic(self, game_path, restore=False, language="en"):
+    def download_edition(self, payload, staging):
+        edition, info = payload["edition"], payload["archive"]
+        filename = f"WWMPL-2.4-{EDITIONS[edition]}-pliki-gry.zip"
+        archive = staging / filename
+        size = 0
+        with requests.get(f"{RELEASE_URL}/{info['tag']}/{filename}", stream=True, timeout=30) as response:
+            response.raise_for_status()
+            with archive.open("wb") as output:
+                for chunk in response.iter_content(chunk_size=256 * 1024):
+                    self.check_cancelled()
+                    size += len(chunk)
+                    if size > info["size"]:
+                        raise ValueError("Pobrana paczka ma nieoczekiwany rozmiar.")
+                    output.write(chunk)
+                    self.set_progress(0.05 + 0.80 * size / info["size"], f"Pobieranie: {EDITIONS[edition]}")
+        if size != info["size"] or not matches(archive, info["sha256"]):
+            raise ValueError("Pobrana paczka nie zgadza się z sumą kontrolną.")
+        try:
+            with ZipFile(archive) as bundle:
+                if sorted(bundle.namelist()) != sorted(PAYLOAD_FILES):
+                    raise ValueError("Paczka powinna zawierać trzy pliki tłumaczenia.")
+                for name in PAYLOAD_FILES:
+                    details = payload["files"][name]
+                    if bundle.getinfo(name).file_size != details["size"]:
+                        raise ValueError(f"Niezgodny rozmiar pliku {name}.")
+                    with bundle.open(name) as source, (staging / name).open("wb") as target:
+                        while chunk := source.read(256 * 1024):
+                            self.check_cancelled()
+                            target.write(chunk)
+                    if not matches(staging / name, details["sha256"]):
+                        raise ValueError(f"Nieprawidłowa suma kontrolna pliku {name}.")
+        except BadZipFile as error:
+            raise ValueError("Pobranej paczki ZIP nie można otworzyć.") from error
+
+    def install_logic(self, game_path, restore=False, language="en", edition=None):
         try:
             if not game_path:
                 raise ValueError("Wskaż główny folder gry.")
@@ -580,7 +655,7 @@ class WWMInstaller(ctk.CTk):
                         raise ValueError("Brak zapisanej instalacji WWMPL dla tego języka.")
                     skipped = self.restore_files(root, data, previous["files"], language) if previous else []
                 else:
-                    self.install_files(root, data, previous, language)
+                    self.install_files(root, data, previous, language, edition)
 
             self.after(0, self.update_status)
             if restore and skipped:
@@ -604,11 +679,14 @@ class WWMInstaller(ctk.CTk):
         finally:
             self.after(0, self.reset_buttons)
 
-    def install_files(self, root, data, previous, language="en"):
+    def install_files(self, root, data, previous, language="en", edition=None):
         self.check_cancelled()
-        response = requests.get(f"{RAW_URL}files/en/manifest.json", timeout=10)
-        response.raise_for_status()
-        payload = response.json()
+        if edition is None:
+            response = requests.get(f"{RAW_URL}files/en/manifest.json", timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        else:
+            payload = fetch_edition(edition)
         validate_manifest(release_manifest(payload, "en"), "en")
         manifest = release_manifest(payload, language)
         validate_manifest(manifest, language)
@@ -649,8 +727,11 @@ class WWMInstaller(ctk.CTk):
                         raise ValueError("Brak aktualnej kopii pliku różnicowego. Sprawdź spójność plików gry.")
                     changes.append((target, previous_diff["sha256"], backup, original))
 
-            for index, name in enumerate(PAYLOAD_FILES):
-                self.download_file(name, staging / name, index, payload["files"][name])
+            if edition is None:
+                for index, name in enumerate(PAYLOAD_FILES):
+                    self.download_file(name, staging / name, index, payload["files"][name])
+            else:
+                self.download_edition(payload, staging)
 
             cached_diff = data / "payload" / (diff_info["sha256"] + ".pol")
             if not matches(cached_diff, diff_info["sha256"]):
@@ -698,7 +779,7 @@ class WWMInstaller(ctk.CTk):
         Recovery(root).apply(changes, self.check_cancelled)
         return skipped
 
-    def launch_and_patch(self, game_path, platform, language="en"):
+    def launch_and_patch(self, game_path, platform, language="en", edition=None):
         try:
             if not game_path:
                 raise ValueError("Wskaż główny folder gry.")
@@ -710,6 +791,8 @@ class WWMInstaller(ctk.CTk):
                 manifest = self.local_manifest(data, language)
                 if manifest is None:
                     raise ValueError("Najpierw zainstaluj spolszczenie dla wybranego języka.")
+                if edition is not None and manifest.get("edition", "basic") != edition:
+                    raise ValueError(f"Najpierw zainstaluj wybraną wersję: {EDITIONS[edition]}.")
                 files = manifest["files"]
                 if not self.has_installed_files(root, language, files):
                     raise ValueError("Brakuje plików tłumaczenia lub uległy zmianie. Zainstaluj spolszczenie ponownie.")

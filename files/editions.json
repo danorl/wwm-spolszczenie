@@ -1,0 +1,68 @@
+{
+  "editions": {
+    "basic": {
+      "edition": "basic",
+      "version": "2.4-2026-11-22",
+      "approvedIds": 256635,
+      "files": {
+        "translate_words_map_en": {
+          "sha256": "656bc68c2235c72a04c79baae4d8d450589ded6ea7a315f2cb2660cfe0af9bd3",
+          "original": "9a2bb446dc2dcc1e2bb4b1bb3207e2990ef7533341a9035ef376c545c3bbdbef",
+          "size": 64757301
+        },
+        "translate_words_map_en__small": {
+          "sha256": "e06500a7231ff66be17a568e717d4c236ea894ebcefc46f3c4f3919d9c81111b",
+          "original": "de48303cca4d06aace5f3cff086903b68636657517cbe663e5e6ae95575c4b49",
+          "size": 169769
+        },
+        "translate_words_map_en_diff": {
+          "sha256": "7c42d37f7213d9c5acaba1a6b124315c04c9c22516f76fb27be99b8060ed53d7",
+          "original": "b25ce2a3e256368bc88119a21e3a251199b00e5152dbbf7b14312099e1fa6d45",
+          "size": 26850537
+        }
+      },
+      "de": {
+        "translate_words_map_de": "c87f57b5f986a686b3d4ea907ac1076b17038f4c8e9b0c832263fbdd298af07a",
+        "translate_words_map_de__small": null,
+        "translate_words_map_de_diff": "57c5325b62223bd43f6fde89be861bf02561373cf51b0b477eb670347ff6b187"
+      },
+      "archive": {
+        "tag": "v2.4-2026-11-22",
+        "sha256": "b4cb05a253fa1a5758bec38d8563b3b1ebd8ea656f12445bf030412dcc033916",
+        "size": 91799020
+      }
+    },
+    "extended": {
+      "edition": "extended",
+      "version": "2.4-2026-11-22",
+      "approvedIds": 875948,
+      "files": {
+        "translate_words_map_en": {
+          "sha256": "69462e0b4cc4204b710b9d7bb23713c1ff5e3c298e16d994824cd374c75e9be2",
+          "original": "9a2bb446dc2dcc1e2bb4b1bb3207e2990ef7533341a9035ef376c545c3bbdbef",
+          "size": 72043342
+        },
+        "translate_words_map_en__small": {
+          "sha256": "2f3b9456add790732d91526e71c27f09531654596e13c4be5194142e6ec5a5db",
+          "original": "de48303cca4d06aace5f3cff086903b68636657517cbe663e5e6ae95575c4b49",
+          "size": 212110
+        },
+        "translate_words_map_en_diff": {
+          "sha256": "c43be4583e2659ce736fbd1072c0dd75d59e0e2068e249cc8148968fbc8bb44a",
+          "original": "b25ce2a3e256368bc88119a21e3a251199b00e5152dbbf7b14312099e1fa6d45",
+          "size": 31276081
+        }
+      },
+      "de": {
+        "translate_words_map_de": "c87f57b5f986a686b3d4ea907ac1076b17038f4c8e9b0c832263fbdd298af07a",
+        "translate_words_map_de__small": null,
+        "translate_words_map_de_diff": "57c5325b62223bd43f6fde89be861bf02561373cf51b0b477eb670347ff6b187"
+      },
+      "archive": {
+        "tag": "v2.4-2026-11-22",
+        "sha256": "a95008a9daca00d1e2f6da85249e169e49dbb3987e5ad9865d5f3d59bcc82977",
+        "size": 103556432
+      }
+    }
+  }
+}
